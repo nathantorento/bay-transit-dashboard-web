@@ -1,0 +1,94 @@
+*,
+*::before,
+*::after {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  padding: 20px;
+  text-align: center;
+}
+
+h1 {
+  font-size: 50px;
+  margin-bottom: 12px;
+}
+
+.mode-badge {
+  display: inline-block;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  border-radius: 4px;
+  margin-bottom: 8px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.mode-badge.fake {
+  background: #444;
+  color: #fff;
+}
+
+.mode-badge.live {
+  background: #c62828;
+  color: #fff;
+}
+
+#last-updated {
+  font-size: 28px;
+  margin-bottom: 32px;
+}
+
+#refresh-btn {
+  font-size: 20px;
+}
+
+#container {
+  width: 100%;
+  padding: 0 32px;
+  box-sizing: border-box;
+}
+
+.transit-line {
+  margin-bottom: 60px;
+  text-align: left;
+}
+
+.header-row {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  margin-bottom: 20px;
+}
+
+.transit-line-logo {
+  width: 80px;
+  height: 80px;
+  border-radius: 50%;
+  background-color: black;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.transit-line-logo span {
+  color: white;
+  font-size: 36px;
+  font-family: Helvetica, Arial, sans-serif;
+  display: inline-block;
+  /* transform: translateY(4px); */
+}
+
+.transit-line-destination {
+  font-size: 30px;
+  font-weight: normal;
+}
+
+.transit-line-arrivals {
+  font-size: 40px;
+  font-weight: bold;
+  margin-left: 106px;
+}
