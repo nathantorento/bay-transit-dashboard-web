@@ -1,4 +1,4 @@
-# 🌁 SF Bay Real-Time Transit Dashboard (Web App)
+# SF Bay Real-Time Transit Dashboard (Web App)
 <p align="center"> 
     <img src="dashboard-preview.png" alt="SF Bay Transit Dashboard Preview"> 
 </p>
