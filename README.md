@@ -1,4 +1,4 @@
-# SF Bay Real-Time Transit Dashboard (Web App)
+# SF Bay Real-Time Transit Dashboard (Web)
 <p align="center"> 
     <img src="dashboard-preview.png" alt="SF Bay Transit Dashboard Preview"> 
 </p>
@@ -6,10 +6,8 @@
 <!-- [![Preview Dashboard](https://img.shields.io/badge/Preview-dashboard.html-333?style=for-the-badge)](https://htmlpreview.github.io/?https://github.com/nathantorento/bay-transit-dashboard/blob/main/dashboard.html) -->
 
 ## Overview
-A lightweight, browser-based dashboard that displays real-time MUNI arrival times using data from the 511.org
- API. The app is designed to be large-text, high-contrast, and e-ink-friendly, while still supporting live countdowns and manual refreshes.
-
-This project started as a Python script that generated a static dashboard.html file. It has since evolved into a small JavaScript web app with live vs debugging mode to not max out API token limit and is optimized for a tablet or small screen set-up.
+A lightweight, browser-based JS dashboard that displays real-time MUNI arrival times using data from the 511.org
+ API. The app is designed to be large-text, high-contrast, and e-ink-friendly, while still supporting live countdowns and manual refreshes. This project started as a Python script that generated a static dashboard.html file. It has since evolved into a small JavaScript web app with live vs debugging mode to not max out API token limit and is optimized for a tablet or small screen set-up.
 
 > <b>Stack</b>: Vanilla JavaScript • HTML/CSS • 511.org API • JSON • Browser APIs
 
