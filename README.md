@@ -1,5 +1,4 @@
 # SF Bay Real-Time Transit Dashboard (Web)
-
 <p align="center"> 
     <img src="dashboard-preview.png" alt="SF Bay Transit Dashboard Preview"> 
 </p>
