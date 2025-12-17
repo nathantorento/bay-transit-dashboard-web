@@ -9,49 +9,46 @@ const COOLDOWN_SECONDS = 30;
 const TOKEN_STORAGE_KEY = "bay_transit_511_token";
 const STOPS_STORAGE_KEY = "bay_transit_last_stops";
 
+const LINE_COLORS = {
+  J: "#f4a300",
+  K: "#67b7d1",
+  L: "#6b4a9a",
+  M: "#1b7f3a",
+  N: "#2a5ea8",
+  T: "#d4145a",
+};
+
+const DEFAULT_LINE_COLOR = "#0b1b3a"; // dark navy
 
 /***********************
  * MODE + STATE
  ***********************/
-let mode = { kind: "fake" }; // {kind:"fake"} OR {kind:"live", token:string}
+// mode variants:
+// - { kind: "fake" }
+// - { kind: "live", token }   (user token, persisted)
+// - { kind: "owner", password } (owner password via Vercel proxy, not persisted)
+let mode = { kind: "fake" };
 
 let cooldownRemaining = 0;
 let cooldownTimerId = null;
 let refreshInFlight = null;
 
-let liveRefreshIntervalId = null;
-let liveRefreshTimeoutId = null;
-
 const fakeDataSeed = [
-  { line: "J", destination: "Downtown (Inbound)", arrivals: [5, 12, 20] },
-  {
-    line: "33",
-    destination: "SF General Hospital (Eastbound)",
-    arrivals: [3, 15, 27],
-  },
+  { line: "J", destination: "Outbound", arrivals: [8, 22, 40] },
+  { line: "33", destination: "Outbound", arrivals: [21, 34, 39] },
 ];
 
-// One canonical list that UI renders from (no matter fake/live)
 let activeRenderedData = [];
 
-// Inline edit state
+// inline edit state
 let editingStopCode = null;
 let editingValue = "";
 let editingError = "";
 
-// Add stop state (new)
+// add stop state
 let isAddingStop = false;
 let addValue = "";
 let addError = "";
-
-function msUntilNextMinute() {
-  const now = new Date();
-  return (
-    (60 - now.getSeconds()) * 1000 -
-    now.getMilliseconds()
-  );
-}
-
 
 /***********************
  * SMALL DOM HELPERS
@@ -64,26 +61,10 @@ function el(tag, className, text) {
 }
 
 /***********************
- * URL STOPS (with normalization)
+ * URL + STORAGE STOPS
  ***********************/
 function isValidStopCode(s) {
   return /^\d{5}$/.test(s);
-}
-
-function loadStopsFromStorage() {
-  const raw = localStorage.getItem(STOPS_STORAGE_KEY);
-  if (!raw) return null;
-  const parts = raw
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean);
-  if (parts.length === 0) return null;
-  if (!parts.every(isValidStopCode)) return null;
-  return parts;
-}
-
-function saveStopsToStorage(stopCodes) {
-  localStorage.setItem(STOPS_STORAGE_KEY, stopCodes.join(","));
 }
 
 function parseStopCodesFromUrl() {
@@ -102,10 +83,6 @@ function parseStopCodesFromUrl() {
   return parts;
 }
 
-function getValidStopCodesOrDefault() {
-  return parseStopCodesFromUrl() ?? DEFAULT_STOP_CODES;
-}
-
 function setStopsParamInUrl(stopCodes, { push = false } = {}) {
   const url = new URL(window.location.href);
   url.searchParams.set("stops", stopCodes.join(","));
@@ -113,12 +90,31 @@ function setStopsParamInUrl(stopCodes, { push = false } = {}) {
   else history.replaceState({}, "", url);
 }
 
-function ensureUrlHasValidStops() {
-  const parsed = parseStopCodesFromUrl();
-  if (parsed) return parsed;
+function loadStopsFromStorage() {
+  const raw = localStorage.getItem(STOPS_STORAGE_KEY);
+  if (!raw) return null;
 
+  const parts = raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  if (parts.length === 0) return null;
+  if (!parts.every(isValidStopCode)) return null;
+
+  return parts;
+}
+
+function saveStopsToStorage(stopCodes) {
+  localStorage.setItem(STOPS_STORAGE_KEY, stopCodes.join(","));
+}
+
+function ensureUrlHasValidStops() {
   const params = new URLSearchParams(window.location.search);
   const hasStopsParam = params.has("stops");
+
+  const parsed = parseStopCodesFromUrl();
+  if (parsed) return parsed;
 
   // If stops param is missing, fall back to last-used stops
   if (!hasStopsParam) {
@@ -135,7 +131,6 @@ function ensureUrlHasValidStops() {
 }
 
 function getLiveStopCodes() {
-  // URL is source of truth for live mode
   return ensureUrlHasValidStops();
 }
 
@@ -143,14 +138,19 @@ function getLiveStopCodes() {
  * MODE UI
  ***********************/
 function isLiveMode() {
-  return mode.kind === "live";
+  return mode.kind === "live" || mode.kind === "owner";
 }
 
 function updateModeBadge() {
   const badge = document.getElementById("mode-badge");
   if (!badge) return;
 
-  badge.textContent = isLiveMode() ? "LIVE DATA" : "FAKE DATA";
+  badge.textContent =
+    mode.kind === "live"
+      ? "LIVE DATA (TOKEN)"
+      : mode.kind === "owner"
+      ? "LIVE DATA (OWNER)"
+      : "FAKE DATA";
   badge.className = `mode-badge ${isLiveMode() ? "live" : "fake"}`;
 }
 
@@ -178,14 +178,18 @@ function setFakeMode() {
   clearAddStopState();
   updateModeBadge();
   updateLockIcon();
-  stopAutoRefreshLive();
 }
 
-function setLiveMode(token) {
+function setTokenLiveMode(token) {
   mode = { kind: "live", token };
   updateModeBadge();
   updateLockIcon();
-  startAutoRefreshLive();
+}
+
+function setOwnerMode(password) {
+  mode = { kind: "owner", password };
+  updateModeBadge();
+  updateLockIcon();
 }
 
 /***********************
@@ -209,16 +213,18 @@ function clearTokenFromStorage() {
  ***********************/
 function openTokenModal() {
   const overlay = document.getElementById("token-modal-overlay");
-  const input = document.getElementById("token-input");
+  const tokenInput = document.getElementById("token-input");
+  const ownerInput = document.getElementById("owner-password-input");
   const errorEl = document.getElementById("token-error");
-  if (!overlay || !input || !errorEl) return;
+  if (!overlay || !tokenInput || !ownerInput || !errorEl) return;
 
   errorEl.classList.add("hidden");
   errorEl.textContent = "";
-  input.value = "";
+  tokenInput.value = "";
+  ownerInput.value = "";
 
   overlay.classList.remove("hidden");
-  input.focus();
+  tokenInput.focus();
 }
 
 function closeTokenModal() {
@@ -227,7 +233,7 @@ function closeTokenModal() {
   overlay.classList.add("hidden");
 }
 
-function showTokenError(msg) {
+function showModalError(msg) {
   const errorEl = document.getElementById("token-error");
   if (!errorEl) return;
   errorEl.textContent = msg;
@@ -309,35 +315,23 @@ const FakeSource = {
 };
 
 const LiveSource = {
-  async refresh(token, stopCodes) {
-    const results = await Promise.allSettled(
-      stopCodes.map((code) => fetchApiJSON(code, token))
-    );
+  async refresh(modeObj, stopCodes) {
+    const fetchOne = async (code) => {
+      if (modeObj.kind === "live") return fetchApiJSON(code, modeObj.token);
+      return fetchApiJSONViaOwnerProxy(code, modeObj.password);
+    };
 
-    return results.map((res, idx) => {
-      const stopCode = stopCodes[idx];
+    const results = await Promise.allSettled(stopCodes.map(fetchOne));
 
-      if (res.status === "fulfilled") {
-        const parsedItem = parseApiJSON(res.value);
-        if (!parsedItem) {
-          return {
-            stopCode,
-            line: "—",
-            destination: "No arrivals",
-            arrivals: [],
-          };
-        }
-        return { stopCode, ...parsedItem };
-      }
-
-      return {
-        stopCode,
-        line: "!",
-        destination: `Error loading stop ${stopCode}`,
-        arrivals: [],
-        errorMessage: res.reason?.message || "Unknown error",
-      };
-    });
+    // Do not render per-stop errors. Just keep successes.
+    return results
+      .map((res, idx) => {
+        if (res.status !== "fulfilled") return null;
+        const parsed = parseApiJSON(res.value);
+        if (!parsed) return null;
+        return { stopCode: stopCodes[idx], ...parsed };
+      })
+      .filter(Boolean);
   },
 };
 
@@ -357,9 +351,8 @@ async function refresh() {
       return;
     }
 
-    if (!mode.token) throw new Error("Missing API token.");
     const stopCodes = getLiveStopCodes();
-    activeRenderedData = await LiveSource.refresh(mode.token, stopCodes);
+    activeRenderedData = await LiveSource.refresh(mode, stopCodes);
   })();
 
   try {
@@ -370,7 +363,7 @@ async function refresh() {
 }
 
 /***********************
- * LIVE API (511)
+ * 511 API (direct)
  ***********************/
 async function fetchApiJSON(stopCode, token) {
   const url = new URL("https://api.511.org/transit/StopMonitoring");
@@ -395,6 +388,32 @@ async function fetchApiJSON(stopCode, token) {
   return json;
 }
 
+/***********************
+ * Owner proxy (Vercel Function)
+ ***********************/
+async function fetchApiJSONViaOwnerProxy(stopCode, ownerPassword) {
+  const url = new URL("/api/stop-monitoring", window.location.origin);
+  url.search = new URLSearchParams({ stopcode: stopCode }).toString();
+
+  const res = await fetch(url, {
+    headers: {
+      "x-owner-password": ownerPassword,
+    },
+  });
+
+  if (!res.ok) {
+    if (res.status === 401) throw new Error("Owner password is incorrect.");
+    throw new Error(`Proxy request failed (${res.status} ${res.statusText}).`);
+  }
+
+  const json = await res.json();
+  validateStopMonitoringShape(json);
+  return json;
+}
+
+/***********************
+ * API SHAPE VALIDATION + PARSING
+ ***********************/
 function validateStopMonitoringShape(json) {
   const visits =
     json?.ServiceDelivery?.StopMonitoringDelivery?.MonitoredStopVisit;
@@ -424,10 +443,9 @@ function validateStopMonitoringShape(json) {
 function parseApiJSON(apiJSON) {
   const visits =
     apiJSON.ServiceDelivery.StopMonitoringDelivery.MonitoredStopVisit;
-  if (visits.length === 0) return null;
+  if (!visits || visits.length === 0) return null;
 
   const mvj0 = visits[0].MonitoredVehicleJourney;
-
   const line = mvj0.LineRef;
 
   const destination =
@@ -445,11 +463,16 @@ function parseApiJSON(apiJSON) {
 }
 
 /***********************
- * TOKEN VALIDATION
+ * VALIDATION HELPERS
  ***********************/
 async function validateTokenOrThrow(token) {
-  const firstStop = getValidStopCodesOrDefault()[0];
+  const firstStop = ensureUrlHasValidStops()[0];
   await fetchApiJSON(firstStop, token);
+}
+
+async function validateOwnerPasswordOrThrow(password) {
+  const firstStop = ensureUrlHasValidStops()[0];
+  await fetchApiJSONViaOwnerProxy(firstStop, password);
 }
 
 /***********************
@@ -459,12 +482,18 @@ function beginInlineEdit(stopCode) {
   editingStopCode = stopCode;
   editingValue = stopCode;
   editingError = "";
+  clearAddStopState();
 }
 
 function applyStopEdit(oldStopCode, newStopCode) {
   const current = getLiveStopCodes();
   const idx = current.indexOf(oldStopCode);
   if (idx === -1) return;
+
+  if (current.includes(newStopCode) && newStopCode !== oldStopCode) {
+    editingError = "That stop is already in the list.";
+    return;
+  }
 
   const next = [...current];
   next[idx] = newStopCode;
@@ -484,8 +513,8 @@ function removeStopCode(stopCode) {
   const next = current.filter((s) => s !== stopCode);
   setStopsParamInUrl(next, { push: true });
   saveStopsToStorage(next);
-  clearInlineEditState();
 
+  clearInlineEditState();
   return { ok: true };
 }
 
@@ -493,6 +522,7 @@ function beginAddStop() {
   isAddingStop = true;
   addValue = "";
   addError = "";
+  clearInlineEditState();
 }
 
 function applyAddStop(newStopCode) {
@@ -506,6 +536,7 @@ function applyAddStop(newStopCode) {
   const next = [...current, newStopCode];
   setStopsParamInUrl(next, { push: true });
   saveStopsToStorage(next);
+
   clearAddStopState();
   return { ok: true };
 }
@@ -526,10 +557,16 @@ function updateLastUpdated() {
   elNode.textContent = `Last updated: ${time}`;
 }
 
+function getLineColor(lineRef) {
+  const key = String(lineRef || "").toUpperCase();
+  return LINE_COLORS[key] || DEFAULT_LINE_COLOR;
+}
+
 function buildTransitLineHeader(item) {
   const headerRowEl = el("div", "header-row");
 
   const logoEl = el("div", "transit-line-logo");
+  logoEl.style.backgroundColor = getLineColor(item.line);
   logoEl.innerHTML = `<span>${item.line}</span>`;
 
   const destEl = el("div", "transit-line-destination", item.destination);
@@ -570,6 +607,10 @@ function buildStopEditorRow(item) {
     }
 
     applyStopEdit(item.stopCode, editingValue);
+    if (editingError) {
+      render(activeRenderedData);
+      return;
+    }
 
     try {
       await refresh();
@@ -612,7 +653,6 @@ function renderStopControls() {
   const controls = document.getElementById("stop-controls");
   if (!controls) return;
 
-  // Fake mode: no stop editing UI at all
   if (!isLiveMode()) {
     controls.innerHTML = "";
     return;
@@ -620,7 +660,6 @@ function renderStopControls() {
 
   controls.innerHTML = "";
 
-  // Render "Add stop" as a transit-line style card
   const addCard = el("div", "transit-line add-stop is-clickable");
   addCard.title = "Add a stop";
   addCard.addEventListener("click", () => {
@@ -639,13 +678,11 @@ function renderStopControls() {
   headerRowEl.append(logoEl, destEl);
   addCard.appendChild(headerRowEl);
 
-  // Add a faint arrivals placeholder so spacing matches real cards
   const placeholderArrivals = el("div", "transit-line-arrivals", "-, -, -");
   addCard.appendChild(placeholderArrivals);
 
   controls.appendChild(addCard);
 
-  // If user clicked Add stop, show the inline editor right under the card
   if (!isAddingStop) return;
 
   const row = el("div", "stop-editor-row");
@@ -691,7 +728,6 @@ function renderStopControls() {
 
   actions.append(saveBtn, cancelBtn);
   row.append(label, input, actions);
-
   controls.appendChild(row);
 
   if (addError) {
@@ -723,7 +759,7 @@ function render(list) {
 
     if (isLiveMode() && item.stopCode) {
       lineEl.classList.add("is-clickable");
-      lineEl.title = `Click to edit stop ${item.stopCode}`;
+      lineEl.title = "Click to edit";
       lineEl.addEventListener("click", () => {
         if (editingStopCode === item.stopCode) return;
         beginInlineEdit(item.stopCode);
@@ -750,7 +786,6 @@ function render(list) {
     `;
   }
 
-  // Stop controls live below the list
   renderStopControls();
 }
 
@@ -758,48 +793,14 @@ function render(list) {
  * TICKERS
  ***********************/
 function startUiTick() {
-  setInterval(() => {
-    render(activeRenderedData);
-  }, UI_TICK_MS);
+  setInterval(() => render(activeRenderedData), UI_TICK_MS);
 }
 
 function startAutoRefreshLive() {
-  stopAutoRefreshLive(); // safety
-
-  // Align first refresh to next real minute
-  const delay = msUntilNextMinute();
-
-  liveRefreshTimeoutId = setTimeout(async () => {
+  setInterval(() => {
     if (!isLiveMode()) return;
-
-    try {
-      await refresh();
-    } catch (err) {
-      console.error("Aligned refresh failed:", err);
-    }
-
-    // After first aligned refresh, repeat every 60s
-    liveRefreshIntervalId = setInterval(async () => {
-      if (!isLiveMode()) return;
-      try {
-        await refresh();
-      } catch (err) {
-        console.error("Auto refresh failed:", err);
-      }
-    }, 60_000);
-  }, delay);
-}
-
-function stopAutoRefreshLive() {
-  if (liveRefreshTimeoutId) {
-    clearTimeout(liveRefreshTimeoutId);
-    liveRefreshTimeoutId = null;
-  }
-
-  if (liveRefreshIntervalId) {
-    clearInterval(liveRefreshIntervalId);
-    liveRefreshIntervalId = null;
-  }
+    refresh().catch((err) => console.error("Auto refresh failed:", err));
+  }, AUTO_REFRESH_MS);
 }
 
 /***********************
@@ -807,10 +808,11 @@ function stopAutoRefreshLive() {
  ***********************/
 function setupUrlStopListener() {
   window.addEventListener("popstate", async () => {
-    ensureUrlHasValidStops();
+    const stops = ensureUrlHasValidStops();
 
-    if (isLiveMode()) saveStopsToStorage(getLiveStopCodes());
+    if (!isLiveMode()) return;
 
+    saveStopsToStorage(stops);
     clearInlineEditState();
     clearAddStopState();
 
@@ -823,20 +825,34 @@ function setupUrlStopListener() {
 }
 
 /***********************
- * LOCK BUTTON + MODAL EVENTS
+ * LOCK + MODAL EVENTS
  ***********************/
 function setupLockAndModal() {
   const lockBtn = document.getElementById("lock-btn");
   const overlay = document.getElementById("token-modal-overlay");
   const cancelBtn = document.getElementById("token-cancel-btn");
-  const saveBtn = document.getElementById("token-save-btn");
-  const input = document.getElementById("token-input");
 
-  if (!lockBtn || !overlay || !cancelBtn || !saveBtn || !input) return;
+  const tokenBtn = document.getElementById("token-save-btn");
+  const tokenInput = document.getElementById("token-input");
+
+  const ownerBtn = document.getElementById("owner-unlock-btn");
+  const ownerInput = document.getElementById("owner-password-input");
+
+  if (
+    !lockBtn ||
+    !overlay ||
+    !cancelBtn ||
+    !tokenBtn ||
+    !tokenInput ||
+    !ownerBtn ||
+    !ownerInput
+  ) {
+    return;
+  }
 
   lockBtn.addEventListener("click", async () => {
     if (isLiveMode()) {
-      clearTokenFromStorage();
+      clearTokenFromStorage(); // only affects token mode; owner mode isn't stored anyway
       setFakeMode();
       await refresh();
       return;
@@ -850,39 +866,76 @@ function setupLockAndModal() {
     if (e.target === overlay) closeTokenModal();
   });
 
-  input.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") saveBtn.click();
+  tokenInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") tokenBtn.click();
     if (e.key === "Escape") closeTokenModal();
   });
 
-  saveBtn.addEventListener("click", async () => {
-    const token = input.value.trim();
+  ownerInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") ownerBtn.click();
+    if (e.key === "Escape") closeTokenModal();
+  });
+
+  tokenBtn.addEventListener("click", async () => {
+    const token = tokenInput.value.trim();
     if (!token) {
-      showTokenError("Paste a token first.");
+      showModalError("Paste a token first.");
       return;
     }
 
-    saveBtn.disabled = true;
-    saveBtn.textContent = "Checking...";
+    tokenBtn.disabled = true;
+    tokenBtn.textContent = "Checking...";
 
     try {
-      ensureUrlHasValidStops();
+      const stops = ensureUrlHasValidStops();
+      saveStopsToStorage(stops);
 
       await validateTokenOrThrow(token);
 
       saveTokenToStorage(token);
-      setLiveMode(token);
+      setTokenLiveMode(token);
 
       closeTokenModal();
       await refresh();
     } catch (err) {
       console.error(err);
-      showTokenError(err.message || "Token failed. Try again.");
+      showModalError(err.message || "Token failed. Try again.");
       setFakeMode();
       await refresh();
     } finally {
-      saveBtn.disabled = false;
-      saveBtn.textContent = "Unlock";
+      tokenBtn.disabled = false;
+      tokenBtn.textContent = "Unlock (Token)";
+    }
+  });
+
+  ownerBtn.addEventListener("click", async () => {
+    const pw = ownerInput.value.trim();
+    if (!pw) {
+      showModalError("Enter the owner password.");
+      return;
+    }
+
+    ownerBtn.disabled = true;
+    ownerBtn.textContent = "Checking...";
+
+    try {
+      const stops = ensureUrlHasValidStops();
+      saveStopsToStorage(stops);
+
+      await validateOwnerPasswordOrThrow(pw);
+
+      setOwnerMode(pw);
+
+      closeTokenModal();
+      await refresh();
+    } catch (err) {
+      console.error(err);
+      showModalError(err.message || "Owner unlock failed.");
+      setFakeMode();
+      await refresh();
+    } finally {
+      ownerBtn.disabled = false;
+      ownerBtn.textContent = "Unlock (Owner)";
     }
   });
 }
@@ -895,20 +948,19 @@ document.addEventListener("DOMContentLoaded", async () => {
   setupLockAndModal();
   setupUrlStopListener();
 
-  // Normalize URL immediately (forces defaults if missing/invalid)
-  ensureUrlHasValidStops();
+  const stops = ensureUrlHasValidStops();
+  saveStopsToStorage(stops);
 
-  // Default: fake mode
   setFakeMode();
   await refresh();
   render(activeRenderedData);
 
-  // Auto-unlock if token exists and validates
-  const stored = loadTokenFromStorage();
-  if (stored) {
+  // auto-unlock token mode if stored token validates
+  const storedToken = loadTokenFromStorage();
+  if (storedToken) {
     try {
-      await validateTokenOrThrow(stored);
-      setLiveMode(stored);
+      await validateTokenOrThrow(storedToken);
+      setTokenLiveMode(storedToken);
       await refresh();
     } catch (err) {
       console.warn("Stored token invalid, clearing.", err);
@@ -919,4 +971,5 @@ document.addEventListener("DOMContentLoaded", async () => {
   }
 
   startUiTick();
+  startAutoRefreshLive();
 });
