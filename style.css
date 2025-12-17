@@ -9,6 +9,8 @@
 body {
   padding: 20px;
   text-align: center;
+  position: relative;
+  font-family: Helvetica, Arial, sans-serif;
 }
 
 h1 {
@@ -23,7 +25,6 @@ h1 {
   font-weight: 600;
   border-radius: 4px;
   margin-bottom: 8px;
-  cursor: pointer;
   user-select: none;
 }
 
@@ -77,9 +78,7 @@ h1 {
 .transit-line-logo span {
   color: white;
   font-size: 36px;
-  font-family: Helvetica, Arial, sans-serif;
   display: inline-block;
-  /* transform: translateY(4px); */
 }
 
 .transit-line-destination {
@@ -91,4 +90,207 @@ h1 {
   font-size: 40px;
   font-weight: bold;
   margin-left: 106px;
+}
+
+.empty-state {
+  margin-top: 32px;
+  font-size: 22px;
+  opacity: 0.85;
+}
+
+/* --- top-right lock button --- */
+.icon-btn {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  border: none;
+  background: transparent;
+  font-size: 28px;
+  cursor: pointer;
+  line-height: 1;
+}
+
+.icon-btn:active {
+  transform: scale(0.98);
+}
+
+/* --- modal --- */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 18px;
+  z-index: 9999;
+}
+
+.modal {
+  width: min(560px, 100%);
+  background: #fff;
+  color: #111;
+  border-radius: 12px;
+  padding: 18px 18px 16px;
+  text-align: left;
+}
+
+.modal h2 {
+  font-size: 20px;
+  margin-bottom: 10px;
+}
+
+.modal-subtext {
+  font-size: 14px;
+  line-height: 1.4;
+  margin-bottom: 12px;
+}
+
+.modal-subtext a {
+  color: #1a73e8;
+  text-decoration: none;
+}
+
+.modal-subtext a:hover {
+  text-decoration: underline;
+}
+
+.modal-input {
+  width: 100%;
+  padding: 10px 12px;
+  font-size: 14px;
+  border-radius: 8px;
+  border: 1px solid #ccc;
+  outline: none;
+}
+
+.modal-input:focus {
+  border-color: #1a73e8;
+}
+
+.modal-error {
+  margin-top: 10px;
+  color: #b00020;
+  font-size: 14px;
+}
+
+.modal-actions {
+  margin-top: 14px;
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+}
+
+.btn-primary,
+.btn-secondary {
+  border: none;
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.btn-primary {
+  background: #1a73e8;
+  color: #fff;
+}
+
+.btn-secondary {
+  background: #eee;
+  color: #111;
+}
+
+.hidden {
+  display: none;
+}
+
+/* --- inline stop editor UI --- */
+.transit-line.is-clickable {
+  cursor: pointer;
+}
+
+.stop-editor-row {
+  margin-left: 106px;
+  margin-top: 10px;
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.stop-editor-label {
+  font-size: 14px;
+  opacity: 0.85;
+}
+
+.stop-editor-input {
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid #ccc;
+  width: 150px;
+  font-size: 14px;
+}
+
+.stop-editor-actions {
+  display: flex;
+  gap: 10px;
+}
+
+.stop-editor-btn {
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: none;
+  cursor: pointer;
+  font-size: 14px;
+}
+
+.stop-editor-btn.danger {
+  background: #b00020;
+  color: #fff;
+}
+
+.stop-editor-error {
+  margin-left: 106px;
+  margin-top: 8px;
+  color: #b00020;
+  font-size: 14px;
+}
+
+/* --- stop controls (Add stop) --- */
+#stop-controls {
+  width: 100%;
+  padding: 0 32px 40px;
+  box-sizing: border-box;
+  text-align: left;
+}
+
+.add-stop-btn {
+  margin-left: 106px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: none;
+  cursor: pointer;
+  font-size: 16px;
+}
+
+/* --- Add stop card --- */
+.transit-line.add-stop {
+  opacity: 0.85;
+}
+
+.transit-line.add-stop.is-clickable:hover {
+  opacity: 1;
+}
+
+.transit-line-logo.add-stop-logo {
+  opacity: 0.28;
+}
+
+.transit-line.add-stop .transit-line-destination {
+  opacity: 0.7;
+  font-style: italic;
+}
+
+.transit-line.add-stop .transit-line-arrivals {
+  opacity: 0.25;
+  font-style: italic;
 }

@@ -2,18 +2,59 @@
 <html>
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=display-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="description" content="Bay Transit Dashboard" />
     <link rel="stylesheet" href="style.css" />
     <title>Bay Transit Dashboard</title>
   </head>
+
   <body>
+    <!-- Top-right lock button -->
+    <button id="lock-btn" class="icon-btn" aria-label="Lock / Unlock">🔒</button>
+
+    <!-- Mode badge -->
     <div id="mode-badge"></div>
 
     <h1>MUNI</h1>
     <div id="last-updated"></div>
     <button id="refresh-btn">Refresh</button>
     <div id="container"></div>
+
+    <div id="container"></div>
+    <div id="stop-controls"></div>
+
+
+    <!-- Token modal -->
+    <div id="token-modal-overlay" class="modal-overlay hidden">
+      <div class="modal" role="dialog" aria-modal="true">
+        <h2>Enable Live Data</h2>
+        <p class="modal-subtext">
+          Paste your 511 API token. Get one here:
+          <a
+            href="https://511.org/open-data/token"
+            target="_blank"
+            rel="noopener noreferrer"
+            >511.org/open-data/token</a
+          >
+        </p>
+
+        <input
+          id="token-input"
+          class="modal-input"
+          placeholder="Paste token here"
+          autocomplete="off"
+          spellcheck="false"
+        />
+
+        <div id="token-error" class="modal-error hidden"></div>
+
+        <div class="modal-actions">
+          <button id="token-cancel-btn" class="btn-secondary">Cancel</button>
+          <button id="token-save-btn" class="btn-primary">Unlock</button>
+        </div>
+      </div>
+    </div>
+
     <script src="script.js"></script>
   </body>
 </html>
