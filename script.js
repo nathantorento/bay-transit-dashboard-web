@@ -45,6 +45,8 @@ let editingStopCode = null;
 let editingValue = "";
 let editingError = "";
 
+let shouldFocusEditInput = false;
+
 // add stop state
 let isAddingStop = false;
 let addValue = "";
@@ -58,6 +60,10 @@ function el(tag, className, text) {
   if (className) node.className = className;
   if (text !== undefined) node.innerText = text;
   return node;
+}
+
+function isClickInsideEditableLine(target) {
+  return !!target.closest(".transit-line");
 }
 
 /***********************
@@ -479,6 +485,7 @@ async function validateOwnerPasswordOrThrow(password) {
  * STOP EDIT / REMOVE / ADD
  ***********************/
 function beginInlineEdit(stopCode) {
+  shouldFocusEditInput = true;
   editingStopCode = stopCode;
   editingValue = stopCode;
   editingError = "";
@@ -585,6 +592,7 @@ function buildStopEditorRow(item) {
   const label = el("div", "stop-editor-label", "Stop code");
 
   const input = el("input", "stop-editor-input");
+  input.id = "stop-editor-input";
   input.value = editingValue;
   input.placeholder = "e.g. 16215";
 
@@ -785,6 +793,19 @@ function render(list) {
       </div>
     `;
   }
+  
+  if (shouldFocusEditInput) {
+    shouldFocusEditInput = false;
+
+    // wait a tick so the input exists in the DOM
+    requestAnimationFrame(() => {
+      const input = document.getElementById("stop-editor-input");
+      if (input) {
+        input.focus();
+        input.select();
+      }
+    });
+  }
 
   renderStopControls();
 }
@@ -972,4 +993,24 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   startUiTick();
   startAutoRefreshLive();
+  document.addEventListener("click", (e) => {
+    if (!isLiveMode()) return;
+    if (!editingStopCode) return;
+
+    // If click is inside a line, do nothing (line handles its own clicks)
+    if (isClickInsideEditableLine(e.target)) return;
+
+    clearInlineEditState();
+    render(activeRenderedData);
+  });
+  
+  const badge = document.getElementById("mode-badge");
+  if (badge) {
+    badge.addEventListener("click", () => {
+      if (!isLiveMode()) {
+        alert("Unlock the page to view real data.");
+      }
+    });
+  }
+
 });
