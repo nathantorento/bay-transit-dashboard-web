@@ -17,40 +17,43 @@ const LINE_COLORS = {
   N: "#2a5ea8",
   T: "#d4145a",
 };
-
 const DEFAULT_LINE_COLOR = "#0b1b3a"; // dark navy
 
 /***********************
  * MODE + STATE
  ***********************/
-// mode variants:
-// - { kind: "fake" }
-// - { kind: "live", token }   (user token, persisted)
-// - { kind: "owner", password } (owner password via Vercel proxy, not persisted)
-let mode = { kind: "fake" };
+let mode = { kind: "fake" }; // fake | live(token) | owner(password)
 
 let cooldownRemaining = 0;
 let cooldownTimerId = null;
 let refreshInFlight = null;
 
+// Fake seed stays for demo/dev
 const fakeDataSeed = [
   { line: "J", destination: "Outbound", arrivals: [8, 22, 40] },
   { line: "33", destination: "Outbound", arrivals: [21, 34, 39] },
 ];
 
+// This is the “source of truth” for what we display
+// Each item: { key, stopCode|null, line, destination, arrivals: Date[] }
 let activeRenderedData = [];
 
-// inline edit state
+// Keep last successful live data by stopCode to prevent flicker on per-stop failures
+const lastGoodByStop = new Map(); // stopCode -> item
+
+// Inline edit state
 let editingStopCode = null;
 let editingValue = "";
 let editingError = "";
 
-let shouldFocusEditInput = false;
-
-// add stop state
+// Add stop state
 let isAddingStop = false;
 let addValue = "";
 let addError = "";
+
+// DOM cache for stable updates (so inputs don’t lose focus)
+const cardByKey = new Map(); // key -> { rootEl, arrivalsEl }
+let lastKeys = []; // last rendered key order
 
 /***********************
  * SMALL DOM HELPERS
@@ -62,17 +65,22 @@ function el(tag, className, text) {
   return node;
 }
 
-function isClickInsideEditableLine(target) {
-  return !!target.closest(".transit-line");
+function isValidStopCode(s) {
+  return /^\d{5}$/.test(s);
+}
+
+function isLiveMode() {
+  return mode.kind === "live" || mode.kind === "owner";
+}
+
+function getLineColor(lineRef) {
+  const key = String(lineRef || "").toUpperCase();
+  return LINE_COLORS[key] || DEFAULT_LINE_COLOR;
 }
 
 /***********************
  * URL + STORAGE STOPS
  ***********************/
-function isValidStopCode(s) {
-  return /^\d{5}$/.test(s);
-}
-
 function parseStopCodesFromUrl() {
   const params = new URLSearchParams(window.location.search);
   const raw = params.get("stops");
@@ -143,10 +151,6 @@ function getLiveStopCodes() {
 /***********************
  * MODE UI
  ***********************/
-function isLiveMode() {
-  return mode.kind === "live" || mode.kind === "owner";
-}
-
 function updateModeBadge() {
   const badge = document.getElementById("mode-badge");
   if (!badge) return;
@@ -157,6 +161,7 @@ function updateModeBadge() {
       : mode.kind === "owner"
       ? "LIVE DATA (OWNER)"
       : "FAKE DATA";
+
   badge.className = `mode-badge ${isLiveMode() ? "live" : "fake"}`;
 }
 
@@ -166,22 +171,14 @@ function updateLockIcon() {
   btn.textContent = isLiveMode() ? "🔓" : "🔒";
 }
 
-function clearInlineEditState() {
+function setFakeMode() {
+  mode = { kind: "fake" };
   editingStopCode = null;
   editingValue = "";
   editingError = "";
-}
-
-function clearAddStopState() {
   isAddingStop = false;
   addValue = "";
   addError = "";
-}
-
-function setFakeMode() {
-  mode = { kind: "fake" };
-  clearInlineEditState();
-  clearAddStopState();
   updateModeBadge();
   updateLockIcon();
 }
@@ -298,6 +295,9 @@ function setupRefreshButton() {
 
     try {
       await refresh();
+      // structural render may be needed if data shape changed
+      renderIfStructureChanged();
+      updateArrivalsInPlace();
     } catch (err) {
       console.error("Manual refresh failed:", err);
     } finally {
@@ -311,7 +311,8 @@ function setupRefreshButton() {
  ***********************/
 const FakeSource = {
   async refresh() {
-    return fakeDataSeed.map((item) => ({
+    return fakeDataSeed.map((item, idx) => ({
+      key: `fake:${idx}`,
       stopCode: null,
       line: item.line,
       destination: item.destination,
@@ -329,15 +330,17 @@ const LiveSource = {
 
     const results = await Promise.allSettled(stopCodes.map(fetchOne));
 
-    // Do not render per-stop errors. Just keep successes.
-    return results
-      .map((res, idx) => {
-        if (res.status !== "fulfilled") return null;
-        const parsed = parseApiJSON(res.value);
-        if (!parsed) return null;
-        return { stopCode: stopCodes[idx], ...parsed };
-      })
-      .filter(Boolean);
+    // return a per-stop map of successes (null for failures)
+    return results.map((res, idx) => {
+      const stopCode = stopCodes[idx];
+      if (res.status !== "fulfilled")
+        return { stopCode, ok: false, parsed: null };
+
+      const parsed = parseApiJSON(res.value);
+      if (!parsed) return { stopCode, ok: false, parsed: null };
+
+      return { stopCode, ok: true, parsed };
+    });
   },
 };
 
@@ -354,11 +357,36 @@ async function refresh() {
   refreshInFlight = (async () => {
     if (getActiveSourceKind() === "fake") {
       activeRenderedData = await FakeSource.refresh();
+      setLastUpdatedNow();
       return;
     }
 
     const stopCodes = getLiveStopCodes();
-    activeRenderedData = await LiveSource.refresh(mode, stopCodes);
+    const perStop = await LiveSource.refresh(mode, stopCodes);
+
+    const next = [];
+
+    for (const entry of perStop) {
+      if (entry.ok) {
+        const item = {
+          key: `stop:${entry.stopCode}`,
+          stopCode: entry.stopCode,
+          line: entry.parsed.line,
+          destination: entry.parsed.destination,
+          arrivals: entry.parsed.arrivals,
+        };
+        lastGoodByStop.set(entry.stopCode, item);
+        next.push(item);
+        continue;
+      }
+
+      // Failure: keep last good for this stop if we have it (prevents flicker)
+      const fallback = lastGoodByStop.get(entry.stopCode);
+      if (fallback) next.push(fallback);
+    }
+
+    activeRenderedData = next;
+    setLastUpdatedNow();
   })();
 
   try {
@@ -366,6 +394,19 @@ async function refresh() {
   } finally {
     refreshInFlight = null;
   }
+}
+
+function setLastUpdatedNow() {
+  const elNode = document.getElementById("last-updated");
+  if (!elNode) return;
+
+  const time = new Date().toLocaleTimeString("en-US", {
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true,
+  });
+
+  elNode.textContent = `Last updated: ${time}`;
 }
 
 /***********************
@@ -402,9 +443,7 @@ async function fetchApiJSONViaOwnerProxy(stopCode, ownerPassword) {
   url.search = new URLSearchParams({ stopcode: stopCode }).toString();
 
   const res = await fetch(url, {
-    headers: {
-      "x-owner-password": ownerPassword,
-    },
+    headers: { "x-owner-password": ownerPassword },
   });
 
   if (!res.ok) {
@@ -484,14 +523,6 @@ async function validateOwnerPasswordOrThrow(password) {
 /***********************
  * STOP EDIT / REMOVE / ADD
  ***********************/
-function beginInlineEdit(stopCode) {
-  shouldFocusEditInput = true;
-  editingStopCode = stopCode;
-  editingValue = stopCode;
-  editingError = "";
-  clearAddStopState();
-}
-
 function applyStopEdit(oldStopCode, newStopCode) {
   const current = getLiveStopCodes();
   const idx = current.indexOf(oldStopCode);
@@ -507,7 +538,11 @@ function applyStopEdit(oldStopCode, newStopCode) {
 
   setStopsParamInUrl(next, { push: true });
   saveStopsToStorage(next);
-  clearInlineEditState();
+
+  // close editor on save
+  editingStopCode = null;
+  editingValue = "";
+  editingError = "";
 }
 
 function removeStopCode(stopCode) {
@@ -521,15 +556,10 @@ function removeStopCode(stopCode) {
   setStopsParamInUrl(next, { push: true });
   saveStopsToStorage(next);
 
-  clearInlineEditState();
+  editingStopCode = null;
+  editingValue = "";
+  editingError = "";
   return { ok: true };
-}
-
-function beginAddStop() {
-  isAddingStop = true;
-  addValue = "";
-  addError = "";
-  clearInlineEditState();
 }
 
 function applyAddStop(newStopCode) {
@@ -544,31 +574,15 @@ function applyAddStop(newStopCode) {
   setStopsParamInUrl(next, { push: true });
   saveStopsToStorage(next);
 
-  clearAddStopState();
+  isAddingStop = false;
+  addValue = "";
+  addError = "";
   return { ok: true };
 }
 
 /***********************
- * RENDERING
+ * RENDERING (STRUCTURE) — called only when needed
  ***********************/
-function updateLastUpdated() {
-  const elNode = document.getElementById("last-updated");
-  if (!elNode) return;
-
-  const time = new Date().toLocaleTimeString("en-US", {
-    hour: "numeric",
-    minute: "2-digit",
-    hour12: true,
-  });
-
-  elNode.textContent = `Last updated: ${time}`;
-}
-
-function getLineColor(lineRef) {
-  const key = String(lineRef || "").toUpperCase();
-  return LINE_COLORS[key] || DEFAULT_LINE_COLOR;
-}
-
 function buildTransitLineHeader(item) {
   const headerRowEl = el("div", "header-row");
 
@@ -582,21 +596,113 @@ function buildTransitLineHeader(item) {
   return headerRowEl;
 }
 
-function buildArrivalsRow(minutesAway) {
-  return el("div", "transit-line-arrivals", minutesAway.join(", "));
+function computeMinutesAway(arrivals, nowMs) {
+  const maxMinutes = 60;
+  return arrivals
+    .map((d) => Math.floor((d.getTime() - nowMs) / 60000))
+    .filter((m) => m > 0 && m <= maxMinutes);
 }
 
-function buildStopEditorRow(item) {
+function renderIfStructureChanged() {
+  const containerEl = document.getElementById("container");
+  if (!containerEl) return;
+
+  const keys = activeRenderedData.map((x) => x.key);
+
+  const same =
+    keys.length === lastKeys.length && keys.every((k, i) => k === lastKeys[i]);
+
+  if (same) {
+    // structure unchanged, just sync editor + stop controls
+    syncEditors();
+    renderStopControls();
+    return;
+  }
+
+  lastKeys = keys;
+  cardByKey.clear();
+  containerEl.innerHTML = "";
+
+  for (const item of activeRenderedData) {
+    const lineEl = el("div", "transit-line");
+    lineEl.dataset.key = item.key;
+
+    if (isLiveMode() && item.stopCode) {
+      lineEl.classList.add("is-clickable");
+      lineEl.title = "Click to edit";
+      lineEl.addEventListener("click", () => {
+        // Clicking the input/buttons should not trigger this (they stopPropagation)
+        if (editingStopCode === item.stopCode) return;
+        editingStopCode = item.stopCode;
+        editingValue = item.stopCode;
+        editingError = "";
+        isAddingStop = false;
+        addValue = "";
+        addError = "";
+        syncEditors(true); // focus input
+      });
+    }
+
+    const arrivalsEl = el("div", "transit-line-arrivals", "");
+    lineEl.append(buildTransitLineHeader(item), arrivalsEl);
+
+    containerEl.appendChild(lineEl);
+    cardByKey.set(item.key, { rootEl: lineEl, arrivalsEl });
+  }
+
+  syncEditors();
+  renderStopControls();
+}
+
+function updateArrivalsInPlace() {
+  const now = Date.now();
+  let renderedCount = 0;
+
+  for (const item of activeRenderedData) {
+    const card = cardByKey.get(item.key);
+    if (!card) continue;
+
+    const mins = computeMinutesAway(item.arrivals, now);
+    if (mins.length === 0) {
+      // keep the card, just show placeholder
+      card.arrivalsEl.textContent = "-, -, -";
+      continue;
+    }
+
+    renderedCount += 1;
+    card.arrivalsEl.textContent = mins.join(", ");
+  }
+
+  const containerEl = document.getElementById("container");
+  if (!containerEl) return;
+
+  // Show empty state only if we have no cards at all
+  if (activeRenderedData.length === 0) {
+    containerEl.innerHTML = `
+      <div class="empty-state">
+        No data yet. Try refreshing.
+      </div>
+    `;
+    return;
+  }
+
+  // If everything is beyond 60 mins, keep cards with placeholders rather than swapping to empty state
+}
+
+function buildStopEditorRow(stopCode) {
+  const editorWrap = document.createElement("div");
+  editorWrap.dataset.editor = "true";
+
   const editorRow = el("div", "stop-editor-row");
 
   const label = el("div", "stop-editor-label", "Stop code");
 
   const input = el("input", "stop-editor-input");
-  input.id = "stop-editor-input";
   input.value = editingValue;
   input.placeholder = "e.g. 16215";
 
   input.addEventListener("click", (e) => e.stopPropagation());
+  input.addEventListener("keydown", (e) => e.stopPropagation());
   input.addEventListener("input", (e) => {
     editingValue = e.target.value.trim();
     editingError = "";
@@ -610,51 +716,79 @@ function buildStopEditorRow(item) {
 
     if (!isValidStopCode(editingValue)) {
       editingError = "Stop codes must be exactly 5 digits.";
-      render(activeRenderedData);
+      syncEditors(true);
       return;
     }
 
-    applyStopEdit(item.stopCode, editingValue);
+    applyStopEdit(stopCode, editingValue);
     if (editingError) {
-      render(activeRenderedData);
+      syncEditors(true);
       return;
     }
 
-    try {
-      await refresh();
-    } catch (err) {
-      console.error("Refresh after stop edit failed:", err);
-    }
+    // Structure might have changed if stop code changed
+    await refresh().catch(console.error);
+    renderIfStructureChanged();
+    updateArrivalsInPlace();
   });
 
   const removeBtn = el("button", "stop-editor-btn danger", "Remove");
   removeBtn.addEventListener("click", async (e) => {
     e.stopPropagation();
 
-    const result = removeStopCode(item.stopCode);
+    const result = removeStopCode(stopCode);
     if (!result.ok) {
-      render(activeRenderedData);
+      syncEditors(true);
       return;
     }
 
-    try {
-      await refresh();
-    } catch (err) {
-      console.error("Refresh after stop removal failed:", err);
-    }
+    await refresh().catch(console.error);
+    renderIfStructureChanged();
+    updateArrivalsInPlace();
   });
 
   const cancelBtn = el("button", "stop-editor-btn", "Cancel");
   cancelBtn.addEventListener("click", (e) => {
     e.stopPropagation();
-    clearInlineEditState();
-    render(activeRenderedData);
+    editingStopCode = null;
+    editingValue = "";
+    editingError = "";
+    syncEditors(false);
   });
 
   actions.append(saveBtn, removeBtn, cancelBtn);
   editorRow.append(label, input, actions);
+  editorWrap.appendChild(editorRow);
 
-  return editorRow;
+  if (editingError) {
+    editorWrap.appendChild(el("div", "stop-editor-error", editingError));
+  }
+
+  return { editorWrap, input };
+}
+
+function syncEditors(shouldFocus) {
+  // Remove any existing editor nodes
+  for (const { rootEl } of cardByKey.values()) {
+    rootEl.querySelectorAll('[data-editor="true"]').forEach((n) => n.remove());
+  }
+
+  if (!isLiveMode() || !editingStopCode) return;
+
+  // Find the card for this stop
+  const key = `stop:${editingStopCode}`;
+  const card = cardByKey.get(key);
+  if (!card) return;
+
+  const { editorWrap, input } = buildStopEditorRow(editingStopCode);
+  card.rootEl.appendChild(editorWrap);
+
+  if (shouldFocus) {
+    requestAnimationFrame(() => {
+      input.focus();
+      input.select();
+    });
+  }
 }
 
 function renderStopControls() {
@@ -672,8 +806,13 @@ function renderStopControls() {
   addCard.title = "Add a stop";
   addCard.addEventListener("click", () => {
     if (isAddingStop) return;
-    beginAddStop();
-    render(activeRenderedData);
+    isAddingStop = true;
+    addValue = "";
+    addError = "";
+    editingStopCode = null;
+    editingValue = "";
+    editingError = "";
+    renderStopControls();
   });
 
   const headerRowEl = el("div", "header-row");
@@ -685,9 +824,7 @@ function renderStopControls() {
 
   headerRowEl.append(logoEl, destEl);
   addCard.appendChild(headerRowEl);
-
-  const placeholderArrivals = el("div", "transit-line-arrivals", "-, -, -");
-  addCard.appendChild(placeholderArrivals);
+  addCard.appendChild(el("div", "transit-line-arrivals", "-, -, -"));
 
   controls.appendChild(addCard);
 
@@ -700,6 +837,8 @@ function renderStopControls() {
   input.placeholder = "Enter stop code (e.g. 16215)";
   input.value = addValue;
 
+  input.addEventListener("click", (e) => e.stopPropagation());
+  input.addEventListener("keydown", (e) => e.stopPropagation());
   input.addEventListener("input", (e) => {
     addValue = e.target.value.trim();
     addError = "";
@@ -708,119 +847,62 @@ function renderStopControls() {
   const actions = el("div", "stop-editor-actions");
 
   const saveBtn = el("button", "stop-editor-btn", "Save");
-  saveBtn.addEventListener("click", async () => {
+  saveBtn.addEventListener("click", async (e) => {
+    e.stopPropagation();
     if (!isValidStopCode(addValue)) {
       addError = "Stop codes must be exactly 5 digits.";
-      render(activeRenderedData);
+      renderStopControls();
       return;
     }
 
     const result = applyAddStop(addValue);
     if (!result.ok) {
-      render(activeRenderedData);
+      renderStopControls();
       return;
     }
 
-    try {
-      await refresh();
-    } catch (err) {
-      console.error("Refresh after add stop failed:", err);
-    }
+    await refresh().catch(console.error);
+    renderIfStructureChanged();
+    updateArrivalsInPlace();
   });
 
   const cancelBtn = el("button", "stop-editor-btn", "Cancel");
-  cancelBtn.addEventListener("click", () => {
-    clearAddStopState();
-    render(activeRenderedData);
+  cancelBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    isAddingStop = false;
+    addValue = "";
+    addError = "";
+    renderStopControls();
   });
 
   actions.append(saveBtn, cancelBtn);
   row.append(label, input, actions);
   controls.appendChild(row);
 
-  if (addError) {
-    controls.appendChild(el("div", "stop-editor-error", addError));
-  }
-}
+  if (addError) controls.appendChild(el("div", "stop-editor-error", addError));
 
-function render(list) {
-  updateLastUpdated();
-
-  const containerEl = document.getElementById("container");
-  if (!containerEl) return;
-
-  containerEl.innerHTML = "";
-
-  const now = Date.now();
-  const maxMinutes = 60;
-  let renderedCount = 0;
-
-  for (const item of list) {
-    const minutesAway = item.arrivals
-      .map((d) => Math.floor((d.getTime() - now) / 60000))
-      .filter((m) => m > 0 && m <= maxMinutes);
-
-    if (minutesAway.length === 0) continue;
-    renderedCount++;
-
-    const lineEl = el("div", "transit-line");
-
-    if (isLiveMode() && item.stopCode) {
-      lineEl.classList.add("is-clickable");
-      lineEl.title = "Click to edit";
-      lineEl.addEventListener("click", () => {
-        if (editingStopCode === item.stopCode) return;
-        beginInlineEdit(item.stopCode);
-        render(activeRenderedData);
-      });
-    }
-
-    lineEl.append(buildTransitLineHeader(item), buildArrivalsRow(minutesAway));
-
-    if (isLiveMode() && item.stopCode && editingStopCode === item.stopCode) {
-      lineEl.append(buildStopEditorRow(item));
-      if (editingError)
-        lineEl.append(el("div", "stop-editor-error", editingError));
-    }
-
-    containerEl.appendChild(lineEl);
-  }
-
-  if (renderedCount === 0) {
-    containerEl.innerHTML = `
-      <div class="empty-state">
-        No upcoming arrivals within the next hour.
-      </div>
-    `;
-  }
-  
-  if (shouldFocusEditInput) {
-    shouldFocusEditInput = false;
-
-    // wait a tick so the input exists in the DOM
-    requestAnimationFrame(() => {
-      const input = document.getElementById("stop-editor-input");
-      if (input) {
-        input.focus();
-        input.select();
-      }
-    });
-  }
-
-  renderStopControls();
+  requestAnimationFrame(() => {
+    input.focus();
+    input.select();
+  });
 }
 
 /***********************
  * TICKERS
  ***********************/
 function startUiTick() {
-  setInterval(() => render(activeRenderedData), UI_TICK_MS);
+  setInterval(() => {
+    // Only update arrivals text in-place. Do NOT rebuild DOM.
+    updateArrivalsInPlace();
+  }, UI_TICK_MS);
 }
 
 function startAutoRefreshLive() {
-  setInterval(() => {
+  setInterval(async () => {
     if (!isLiveMode()) return;
-    refresh().catch((err) => console.error("Auto refresh failed:", err));
+    await refresh().catch((err) => console.error("Auto refresh failed:", err));
+    renderIfStructureChanged();
+    updateArrivalsInPlace();
   }, AUTO_REFRESH_MS);
 }
 
@@ -834,14 +916,36 @@ function setupUrlStopListener() {
     if (!isLiveMode()) return;
 
     saveStopsToStorage(stops);
-    clearInlineEditState();
-    clearAddStopState();
 
-    try {
-      await refresh();
-    } catch (err) {
-      console.error("Refresh after URL change failed:", err);
-    }
+    // Close editors on URL nav
+    editingStopCode = null;
+    editingValue = "";
+    editingError = "";
+    isAddingStop = false;
+    addValue = "";
+    addError = "";
+
+    await refresh().catch(console.error);
+    renderIfStructureChanged();
+    updateArrivalsInPlace();
+  });
+}
+
+/***********************
+ * CLICK OUTSIDE TO CLOSE EDITOR
+ ***********************/
+function setupClickOutsideToCloseEditor() {
+  document.addEventListener("click", (e) => {
+    if (!isLiveMode()) return;
+    if (!editingStopCode) return;
+
+    // If click is inside a transit line, do nothing
+    if (e.target.closest(".transit-line")) return;
+
+    editingStopCode = null;
+    editingValue = "";
+    editingError = "";
+    syncEditors(false);
   });
 }
 
@@ -867,15 +971,16 @@ function setupLockAndModal() {
     !tokenInput ||
     !ownerBtn ||
     !ownerInput
-  ) {
+  )
     return;
-  }
 
   lockBtn.addEventListener("click", async () => {
     if (isLiveMode()) {
-      clearTokenFromStorage(); // only affects token mode; owner mode isn't stored anyway
+      clearTokenFromStorage();
       setFakeMode();
-      await refresh();
+      await refresh().catch(console.error);
+      renderIfStructureChanged();
+      updateArrivalsInPlace();
       return;
     }
     openTokenModal();
@@ -918,11 +1023,15 @@ function setupLockAndModal() {
 
       closeTokenModal();
       await refresh();
+      renderIfStructureChanged();
+      updateArrivalsInPlace();
     } catch (err) {
       console.error(err);
       showModalError(err.message || "Token failed. Try again.");
       setFakeMode();
-      await refresh();
+      await refresh().catch(console.error);
+      renderIfStructureChanged();
+      updateArrivalsInPlace();
     } finally {
       tokenBtn.disabled = false;
       tokenBtn.textContent = "Unlock (Token)";
@@ -949,15 +1058,31 @@ function setupLockAndModal() {
 
       closeTokenModal();
       await refresh();
+      renderIfStructureChanged();
+      updateArrivalsInPlace();
     } catch (err) {
       console.error(err);
       showModalError(err.message || "Owner unlock failed.");
       setFakeMode();
-      await refresh();
+      await refresh().catch(console.error);
+      renderIfStructureChanged();
+      updateArrivalsInPlace();
     } finally {
       ownerBtn.disabled = false;
       ownerBtn.textContent = "Unlock (Owner)";
     }
+  });
+}
+
+/***********************
+ * FAKE BADGE ALERT
+ ***********************/
+function setupFakeBadgeAlert() {
+  const badge = document.getElementById("mode-badge");
+  if (!badge) return;
+
+  badge.addEventListener("click", () => {
+    if (!isLiveMode()) alert("unlock the page to view real data");
   });
 }
 
@@ -968,13 +1093,17 @@ document.addEventListener("DOMContentLoaded", async () => {
   setupRefreshButton();
   setupLockAndModal();
   setupUrlStopListener();
+  setupClickOutsideToCloseEditor();
+  setupFakeBadgeAlert();
 
   const stops = ensureUrlHasValidStops();
   saveStopsToStorage(stops);
 
   setFakeMode();
-  await refresh();
-  render(activeRenderedData);
+
+  await refresh().catch(console.error);
+  renderIfStructureChanged();
+  updateArrivalsInPlace();
 
   // auto-unlock token mode if stored token validates
   const storedToken = loadTokenFromStorage();
@@ -982,35 +1111,19 @@ document.addEventListener("DOMContentLoaded", async () => {
     try {
       await validateTokenOrThrow(storedToken);
       setTokenLiveMode(storedToken);
-      await refresh();
+      await refresh().catch(console.error);
+      renderIfStructureChanged();
+      updateArrivalsInPlace();
     } catch (err) {
       console.warn("Stored token invalid, clearing.", err);
       clearTokenFromStorage();
       setFakeMode();
-      await refresh();
+      await refresh().catch(console.error);
+      renderIfStructureChanged();
+      updateArrivalsInPlace();
     }
   }
 
   startUiTick();
   startAutoRefreshLive();
-  document.addEventListener("click", (e) => {
-    if (!isLiveMode()) return;
-    if (!editingStopCode) return;
-
-    // If click is inside a line, do nothing (line handles its own clicks)
-    if (isClickInsideEditableLine(e.target)) return;
-
-    clearInlineEditState();
-    render(activeRenderedData);
-  });
-  
-  const badge = document.getElementById("mode-badge");
-  if (badge) {
-    badge.addEventListener("click", () => {
-      if (!isLiveMode()) {
-        alert("Unlock the page to view real data.");
-      }
-    });
-  }
-
 });
