@@ -1,12 +1,43 @@
 /***********************
+ * AUTH STORAGE
+ ***********************/
+function loadTokenFromStorage() {
+  const t = localStorage.getItem(TOKEN_STORAGE_KEY);
+  return t && t.trim() ? t.trim() : null;
+}
+
+function saveTokenToStorage(token) {
+  localStorage.setItem(TOKEN_STORAGE_KEY, token);
+}
+
+function clearTokenFromStorage() {
+  localStorage.removeItem(TOKEN_STORAGE_KEY);
+}
+
+function loadOwnerPasswordFromStorage() {
+  const pw = localStorage.getItem(OWNER_PASSWORD_STORAGE_KEY);
+  return pw && pw.trim() ? pw.trim() : null;
+}
+
+function saveOwnerPasswordToStorage(password) {
+  localStorage.setItem(OWNER_PASSWORD_STORAGE_KEY, password);
+}
+
+function clearOwnerPasswordFromStorage() {
+  localStorage.removeItem(OWNER_PASSWORD_STORAGE_KEY);
+}
+
+/***********************
  * CONFIG
  ***********************/
 const DEFAULT_STOP_CODES = ["16215", "13323"];
 const AUTO_REFRESH_MS = 60_000;
 const UI_TICK_MS = 1000;
 const COOLDOWN_SECONDS = 30;
+const OWNER_RETRY_MS = 60_000;
 
 const TOKEN_STORAGE_KEY = "bay_transit_511_token";
+const OWNER_PASSWORD_STORAGE_KEY = "bay_transit_owner_password";
 const STOPS_STORAGE_KEY = "bay_transit_last_stops";
 
 const LINE_COLORS = {
@@ -27,6 +58,7 @@ let mode = { kind: "fake" }; // fake | live(token) | owner(password)
 let cooldownRemaining = 0;
 let cooldownTimerId = null;
 let refreshInFlight = null;
+let ownerRetryTimerId = null;
 
 // Fake seed stays for demo/dev
 const fakeDataSeed = [
@@ -159,8 +191,8 @@ function updateModeBadge() {
     mode.kind === "live"
       ? "LIVE DATA (TOKEN)"
       : mode.kind === "owner"
-      ? "LIVE DATA (OWNER)"
-      : "FAKE DATA";
+        ? "LIVE DATA (OWNER)"
+        : "FAKE DATA";
 
   badge.className = `mode-badge ${isLiveMode() ? "live" : "fake"}`;
 }
@@ -193,22 +225,6 @@ function setOwnerMode(password) {
   mode = { kind: "owner", password };
   updateModeBadge();
   updateLockIcon();
-}
-
-/***********************
- * TOKEN STORAGE
- ***********************/
-function loadTokenFromStorage() {
-  const t = localStorage.getItem(TOKEN_STORAGE_KEY);
-  return t && t.trim() ? t.trim() : null;
-}
-
-function saveTokenToStorage(token) {
-  localStorage.setItem(TOKEN_STORAGE_KEY, token);
-}
-
-function clearTokenFromStorage() {
-  localStorage.removeItem(TOKEN_STORAGE_KEY);
 }
 
 /***********************
@@ -442,13 +458,30 @@ async function fetchApiJSONViaOwnerProxy(stopCode, ownerPassword) {
   const url = new URL("/api/stop-monitoring", window.location.origin);
   url.search = new URLSearchParams({ stopcode: stopCode }).toString();
 
-  const res = await fetch(url, {
-    headers: { "x-owner-password": ownerPassword },
-  });
+  let res;
+
+  try {
+    res = await fetch(url, {
+      headers: { "x-owner-password": ownerPassword },
+    });
+  } catch (err) {
+    const error = new Error("Network error while reaching owner proxy.");
+    error.code = "NETWORK_ERROR";
+    throw error;
+  }
 
   if (!res.ok) {
-    if (res.status === 401) throw new Error("Owner password is incorrect.");
-    throw new Error(`Proxy request failed (${res.status} ${res.statusText}).`);
+    if (res.status === 401) {
+      const error = new Error("Owner password is incorrect.");
+      error.code = "INVALID_OWNER_PASSWORD";
+      throw error;
+    }
+
+    const error = new Error(
+      `Proxy request failed (${res.status} ${res.statusText}).`,
+    );
+    error.code = "OWNER_PROXY_ERROR";
+    throw error;
   }
 
   const json = await res.json();
@@ -459,13 +492,52 @@ async function fetchApiJSONViaOwnerProxy(stopCode, ownerPassword) {
 /***********************
  * API SHAPE VALIDATION + PARSING
  ***********************/
+function scheduleOwnerRestoreRetry() {
+  if (ownerRetryTimerId !== null) return;
+
+  ownerRetryTimerId = setTimeout(async () => {
+    ownerRetryTimerId = null;
+
+    const storedOwnerPassword = loadOwnerPasswordFromStorage();
+    if (!storedOwnerPassword || isLiveMode()) return;
+
+    try {
+      await validateOwnerPasswordOrThrow(storedOwnerPassword);
+
+      setOwnerMode(storedOwnerPassword);
+
+      await refresh().catch(console.error);
+      renderIfStructureChanged();
+      updateArrivalsInPlace();
+
+      console.log("Owner mode restored after temporary failure.");
+    } catch (err) {
+      if (err.code === "INVALID_OWNER_PASSWORD") {
+        console.warn("Stored owner password invalid, clearing.", err);
+        clearOwnerPasswordFromStorage();
+        return;
+      }
+
+      console.warn("Owner restore retry failed; trying again later.", err);
+      scheduleOwnerRestoreRetry();
+    }
+  }, OWNER_RETRY_MS);
+}
+
+function cancelOwnerRestoreRetry() {
+  if (ownerRetryTimerId !== null) {
+    clearTimeout(ownerRetryTimerId);
+    ownerRetryTimerId = null;
+  }
+}
+
 function validateStopMonitoringShape(json) {
   const visits =
     json?.ServiceDelivery?.StopMonitoringDelivery?.MonitoredStopVisit;
 
   if (!Array.isArray(visits)) {
     throw new Error(
-      "API format changed: ServiceDelivery.StopMonitoringDelivery.MonitoredStopVisit missing or not an array."
+      "API format changed: ServiceDelivery.StopMonitoringDelivery.MonitoredStopVisit missing or not an array.",
     );
   }
 
@@ -497,11 +569,12 @@ function parseApiJSON(apiJSON) {
     mvj0.DirectionRef === "IB"
       ? "Inbound"
       : mvj0.DirectionRef === "OB"
-      ? "Outbound"
-      : mvj0.DirectionRef;
+        ? "Outbound"
+        : mvj0.DirectionRef;
 
   const arrivals = visits.map(
-    (v) => new Date(v.MonitoredVehicleJourney.MonitoredCall.ExpectedArrivalTime)
+    (v) =>
+      new Date(v.MonitoredVehicleJourney.MonitoredCall.ExpectedArrivalTime),
   );
 
   return { line, destination, arrivals };
@@ -977,12 +1050,16 @@ function setupLockAndModal() {
   lockBtn.addEventListener("click", async () => {
     if (isLiveMode()) {
       clearTokenFromStorage();
+      clearOwnerPasswordFromStorage();
+      cancelOwnerRestoreRetry();
+
       setFakeMode();
       await refresh().catch(console.error);
       renderIfStructureChanged();
       updateArrivalsInPlace();
       return;
     }
+
     openTokenModal();
   });
 
@@ -1054,6 +1131,8 @@ function setupLockAndModal() {
 
       await validateOwnerPasswordOrThrow(pw);
 
+      saveOwnerPasswordToStorage(pw);
+      cancelOwnerRestoreRetry();
       setOwnerMode(pw);
 
       closeTokenModal();
@@ -1105,22 +1184,59 @@ document.addEventListener("DOMContentLoaded", async () => {
   renderIfStructureChanged();
   updateArrivalsInPlace();
 
-  // auto-unlock token mode if stored token validates
-  const storedToken = loadTokenFromStorage();
-  if (storedToken) {
+  // First try restoring owner mode
+  const storedOwnerPassword = loadOwnerPasswordFromStorage();
+
+  if (storedOwnerPassword) {
     try {
-      await validateTokenOrThrow(storedToken);
-      setTokenLiveMode(storedToken);
+      await validateOwnerPasswordOrThrow(storedOwnerPassword);
+
+      setOwnerMode(storedOwnerPassword);
+
       await refresh().catch(console.error);
       renderIfStructureChanged();
       updateArrivalsInPlace();
     } catch (err) {
-      console.warn("Stored token invalid, clearing.", err);
-      clearTokenFromStorage();
+      if (err.code === "INVALID_OWNER_PASSWORD") {
+        console.warn("Stored owner password invalid, clearing.", err);
+        clearOwnerPasswordFromStorage();
+      } else {
+        console.warn(
+          "Owner restore failed temporarily; keeping saved password.",
+          err,
+        );
+        scheduleOwnerRestoreRetry();
+      }
+
       setFakeMode();
+
       await refresh().catch(console.error);
       renderIfStructureChanged();
       updateArrivalsInPlace();
+    }
+  } else {
+    // Otherwise try restoring user-token mode
+    const storedToken = loadTokenFromStorage();
+
+    if (storedToken) {
+      try {
+        await validateTokenOrThrow(storedToken);
+
+        setTokenLiveMode(storedToken);
+
+        await refresh().catch(console.error);
+        renderIfStructureChanged();
+        updateArrivalsInPlace();
+      } catch (err) {
+        console.warn("Stored token invalid, clearing.", err);
+
+        clearTokenFromStorage();
+        setFakeMode();
+
+        await refresh().catch(console.error);
+        renderIfStructureChanged();
+        updateArrivalsInPlace();
+      }
     }
   }
 
